@@ -1,3 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.env
+
 # Local .terraform directories
 .terraform/
 
