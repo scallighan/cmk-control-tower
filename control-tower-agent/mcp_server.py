@@ -42,7 +42,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from azure.identity import AzureCliCredential
+from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
@@ -63,8 +63,8 @@ mcp = FastMCP(
 )
 
 
-def _credential() -> AzureCliCredential:
-    return AzureCliCredential()
+def _credential() -> DefaultAzureCredential:
+    return DefaultAzureCredential()
 
 
 def _context(dispute_id: str) -> dict[str, Any] | None:

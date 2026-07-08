@@ -26,7 +26,7 @@ from typing import Any, Literal
 from agent_framework import Agent, MCPStreamableHTTPTool
 from agent_framework.foundry import FoundryChatClient
 from agent_framework.openai import OpenAIChatOptions
-from azure.identity import AzureCliCredential
+from azure.identity import DefaultAzureCredential
 from pydantic import BaseModel
 
 
@@ -144,7 +144,7 @@ def _client() -> FoundryChatClient:
     return FoundryChatClient(
         project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
         model=os.environ["FOUNDRY_MODEL"],
-        credential=AzureCliCredential(),
+        credential=DefaultAzureCredential(),
     )
 
 

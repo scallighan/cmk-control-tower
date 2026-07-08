@@ -2,7 +2,7 @@
 
 Connects to the Azure SQL ``cmk-sqldb-ledger`` database using an Entra ID
 (Azure AD) access token obtained from the local ``az login`` session, exactly
-like the Foundry client in ``main.py`` (both use ``AzureCliCredential``).
+like the Foundry client in ``main.py`` (both use ``DefaultAzureCredential``).
 
 The database is a set of SQL Server *ledger* tables (tamper-evident). This
 module only ever issues ``SELECT`` statements -- nothing here writes back.
@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any
 
 import pyodbc
-from azure.identity import AzureCliCredential
+from azure.identity import DefaultAzureCredential
 
 # The ODBC connection attribute id for "use this Entra access token".
 SQL_COPT_SS_ACCESS_TOKEN = 1256
@@ -71,15 +71,15 @@ class TradeRecord:
     settle_date: str
 
 
-def _token_struct(credential: AzureCliCredential) -> bytes:
+def _token_struct(credential: DefaultAzureCredential) -> bytes:
     """Fetch an Entra token for Azure SQL and pack it the way ODBC expects."""
     token = credential.get_token(_DATABASE_SCOPE).token.encode("utf-16-le")
     return struct.pack("=i", len(token)) + token
 
 
-def get_connection(credential: AzureCliCredential | None = None) -> pyodbc.Connection:
+def get_connection(credential: DefaultAzureCredential | None = None) -> pyodbc.Connection:
     """Open a read-only connection to the ledger DB using an Entra token."""
-    credential = credential or AzureCliCredential()
+    credential = credential or DefaultAzureCredential()
     server = os.environ.get("SQL_SERVER", DEFAULT_SERVER)
     database = os.environ.get("SQL_DATABASE", DEFAULT_DATABASE)
     # Serverless Azure SQL can auto-pause; resuming may take a while, so allow a
@@ -124,7 +124,7 @@ def _row_to_public_dict(cursor: pyodbc.Cursor) -> dict[str, Any] | None:
 
 
 def fetch_trade_detail(
-    trade_id: str, credential: AzureCliCredential | None = None
+    trade_id: str, credential: DefaultAzureCredential | None = None
 ) -> dict[str, Any] | None:
     """Fetch the full DB detail behind a booked trade for the UI modal.
 
@@ -183,7 +183,7 @@ def fetch_trade_detail(
 
 
 def fetch_trades_by_ids(
-    trade_ids: list[str], credential: AzureCliCredential | None = None
+    trade_ids: list[str], credential: DefaultAzureCredential | None = None
 ) -> dict[str, TradeRecord]:
     """Fetch booked trades for the given ``trade_id`` values (order-insensitive)."""
     unique = list(dict.fromkeys(trade_ids))
@@ -218,7 +218,7 @@ def fetch_trades_by_ids(
     }
 
 
-def fetch_securities(sec_ids: set[str], credential: AzureCliCredential | None = None) -> dict[str, Security]:
+def fetch_securities(sec_ids: set[str], credential: DefaultAzureCredential | None = None) -> dict[str, Security]:
     """Fetch the securities-master rows for the given ``sec_id`` values."""
     if not sec_ids:
         return {}
@@ -244,7 +244,7 @@ def fetch_securities(sec_ids: set[str], credential: AzureCliCredential | None = 
 
 
 def fetch_open_disputes(
-    limit: int = 200, credential: AzureCliCredential | None = None
+    limit: int = 200, credential: DefaultAzureCredential | None = None
 ) -> list[dict[str, Any]]:
     """List OPEN disputes for the control-tower work queue.
 
@@ -278,7 +278,7 @@ def fetch_open_disputes(
 
 
 def fetch_dispute_context(
-    dispute_id: str, credential: AzureCliCredential | None = None
+    dispute_id: str, credential: DefaultAzureCredential | None = None
 ) -> dict[str, Any] | None:
     """Assemble the full evidence context an agent pipeline needs for one dispute.
 
@@ -485,7 +485,7 @@ def fetch_dispute_context(
     }
 
 
-def fetch_counterparties(cp_ids: set[str], credential: AzureCliCredential | None = None) -> dict[str, Counterparty]:
+def fetch_counterparties(cp_ids: set[str], credential: DefaultAzureCredential | None = None) -> dict[str, Counterparty]:
     """Fetch the approved-counterparty rows for the given ``cp_id`` values."""
     if not cp_ids:
         return {}

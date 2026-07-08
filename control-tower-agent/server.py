@@ -520,7 +520,41 @@ async def get_trade_detail(trade_id: str) -> dict[str, Any]:
     return detail
 
 
+# ---------------------------------------------------------------------------
+# Static frontend (built React app). When the Vite build output exists (as it
+# does in the container image), the same server serves the UI and the API from
+# a single origin, so no CORS/proxy is needed in production.
+# ---------------------------------------------------------------------------
+import os
+
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+_WEB_DIST = os.path.join(os.path.dirname(__file__), "web", "dist")
+
+if os.path.isdir(_WEB_DIST):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=os.path.join(_WEB_DIST, "assets")),
+        name="assets",
+    )
+
+    @app.get("/")
+    async def _spa_index() -> FileResponse:
+        return FileResponse(os.path.join(_WEB_DIST, "index.html"))
+
+    @app.get("/{full_path:path}")
+    async def _spa_fallback(full_path: str) -> FileResponse:
+        # Never shadow the API; let unmatched /api paths 404 as usual.
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        candidate = os.path.join(_WEB_DIST, full_path)
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(_WEB_DIST, "index.html"))
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))

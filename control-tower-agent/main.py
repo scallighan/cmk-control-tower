@@ -23,7 +23,7 @@ kept in memory with a real SHA-256 digest.
 
 Prerequisites:
 - FOUNDRY_PROJECT_ENDPOINT / FOUNDRY_MODEL for Azure AI Foundry.
-- Azure CLI login (``az login``) for AzureCliCredential (Foundry + SQL).
+- Azure CLI login (``az login``) for DefaultAzureCredential (Foundry + SQL).
 - ODBC Driver 18 for SQL Server (pyodbc). SQL_SERVER / SQL_DATABASE in env.
 """
 
@@ -44,7 +44,7 @@ from agent_framework import (
     handler,
     response_handler,
 )
-from azure.identity import AzureCliCredential
+from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 from typing_extensions import Never
 
@@ -159,7 +159,7 @@ def _record_io(ctx: WorkflowContext, stage: str, input_payload: Any, output: Any
 # ---------------------------------------------------------------------------
 @executor(id="load_dispute")
 async def load_dispute(dispute_id: str, ctx: WorkflowContext[str, str]) -> None:
-    context = db.fetch_dispute_context(dispute_id, AzureCliCredential())
+    context = db.fetch_dispute_context(dispute_id, DefaultAzureCredential())
     if context is None:
         await ctx.yield_output(f"Dispute {dispute_id} not found in the ledger.")
         return
@@ -779,7 +779,7 @@ async def main() -> None:
     if len(sys.argv) > 1:
         dispute_id = sys.argv[1]
     else:
-        disputes = db.fetch_open_disputes(limit=1, credential=AzureCliCredential())
+        disputes = db.fetch_open_disputes(limit=1, credential=DefaultAzureCredential())
         if not disputes:
             print("No open disputes found.")
             return
