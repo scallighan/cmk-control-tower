@@ -1,4 +1,4 @@
-agent-framework
+agent-framework==1.9.0
 azure-identity
 python-dotenv
 pydantic

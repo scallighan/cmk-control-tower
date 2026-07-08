@@ -94,6 +94,12 @@ resource "azurerm_role_assignment" "app_foundry" {
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }
 
+resource "azurerm_role_assignment" "app_foundry_2" {
+  scope                = data.azurerm_cognitive_account.foundry.id
+  role_definition_name = "Foundry User"
+  principal_id         = azurerm_user_assigned_identity.app.principal_id
+}
+
 # --- Container App environment + app ---------------------------------------
 
 resource "azurerm_container_app_environment" "this" {
