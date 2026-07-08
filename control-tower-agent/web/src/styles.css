@@ -290,6 +290,29 @@ td.reason {
   color: var(--accent);
 }
 
+/* Actions under the drafted counterparty communication. */
+.draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+/* Bordered, "copy-able" block wrapping the drafted email. */
+.draft-email {
+  margin-top: 0.5rem;
+  padding: 0.85rem 1rem;
+  background: #0b1220;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.draft-email .draft-body {
+  margin: 0.5rem 0 0;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+
 .output {
   background: #0b1220;
   border: 1px solid var(--border);
@@ -439,3 +462,244 @@ button.close {
   font-size: 0.82rem;
   margin: 0 0 1rem;
 }
+
+/* Multi-agent pipeline layout */
+.app {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+.app-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 1.8rem;
+}
+
+.uploader {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+button.primary { background: var(--accent); color: #06283d; }
+button.danger { background: var(--danger); color: #450a0a; }
+
+.grid { width: 100%; }
+
+.linklike {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+}
+.linklike:hover { text-decoration: underline; }
+
+.cell-input {
+  width: 100%;
+  min-width: 7rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.82rem;
+}
+
+.review { border-color: var(--warn); }
+
+/* Risk badges */
+.badge.risk-high { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+.badge.risk-medium { background: rgba(245, 158, 11, 0.2); color: var(--warn); }
+.badge.risk-low { background: rgba(34, 197, 94, 0.2); color: var(--ok); }
+
+/* Dispute case cards */
+.case-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.case-card {
+  background: #0b1220;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.case-card:hover { border-color: var(--accent); }
+
+.case-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.case-card p { margin: 0.25rem 0; font-size: 0.85rem; }
+.case-foot { margin-top: 0.6rem !important; font-size: 0.78rem !important; }
+
+.finding {
+  margin: 0.4rem 0;
+  padding-left: 1.1rem;
+  font-size: 0.86rem;
+}
+.finding li { margin: 0.25rem 0; }
+
+/* ---- Dispute-pipeline UI (v4) ---- */
+button.sm { padding: 0.35rem 0.7rem; font-size: 0.82rem; }
+button.ghost.sm { margin-top: 0; }
+
+.badge-cat {
+  background: rgba(56, 189, 248, 0.16);
+  color: var(--accent);
+}
+
+.linklike.big { font-size: 1.2rem; }
+
+.run-head {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.run-head h2 { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.agent-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.15rem 1.15rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+.agent-card-head h3 { margin: 0; font-size: 1rem; flex: 1; }
+
+.agent-step {
+  flex: 0 0 auto;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  background: rgba(56, 189, 248, 0.16);
+  color: var(--accent);
+}
+
+.agent-card-body p { margin: 0.3rem 0; font-size: 0.86rem; }
+.agent-card-body .finding { margin: 0.4rem 0; }
+
+.artifact-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.5rem 0;
+}
+.artifact {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 6px;
+  font-family: ui-monospace, monospace;
+  border: 1px solid var(--border);
+}
+.artifact.have { color: var(--ok); border-color: rgba(34, 197, 94, 0.4); }
+.artifact.miss { color: var(--muted); opacity: 0.7; text-decoration: line-through; }
+
+.decision-controls {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin: 1rem 0;
+  align-items: flex-end;
+}
+.decision-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.decision-controls .grow { flex: 1; min-width: 12rem; }
+.decision-controls select,
+.decision-controls input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.45rem 0.55rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.wf-produces {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.2rem;
+}
+
+/* ---- Live streaming (v5) ---- */
+.badge-processing {
+  background: rgba(56, 189, 248, 0.16);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.badge-idle { background: rgba(148, 163, 184, 0.16); color: var(--muted); }
+
+.spinner {
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 999px;
+  display: inline-block;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.agent-card.phase-pending { opacity: 0.5; }
+.agent-card.phase-processing {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.3);
+}
+.agent-card.phase-processing .agent-step {
+  background: var(--accent);
+  color: #06283d;
+}
+
+.io-details { margin-top: 0.6rem; }
+.io-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  margin: 0.4rem 0 0.2rem;
+}
+.io-details .output { max-height: 16rem; overflow: auto; font-size: 0.72rem; }

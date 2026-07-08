@@ -12,48 +12,67 @@ interface Step {
   id: string;
   title: string;
   detail: string;
-  branch?: "matched" | "broken";
+  produces: string;
 }
 
-// The reconciliation workflow assembled in main.py (build_workflow).
+// The dispute pipeline assembled in main.py (build_workflow), sourced from the
+// agents/ handoff briefing.
 const STEPS: Step[] = [
   {
-    id: "ingest",
-    title: "1 · Ingest confirmations CSV",
-    detail: "Parse each uploaded row (trade_id, source, cfm_price, cfm_qty, cfm_gross).",
-  },
-  {
-    id: "lookup",
-    title: "2 · Look up booked trades (SQL, read-only)",
-    detail: "Fetch the firm's economics of record from demo4_trades for each trade_id.",
-  },
-  {
-    id: "agent",
-    title: "3 · Reconciliation agent",
+    id: "load",
+    title: "0 · Load dispute context",
     detail:
-      "Azure AI Foundry agent decides matched vs broken per row and proposes minimal cfm_* corrections.",
+      "Assemble the full lifecycle for the selected dispute from the SQL ledger (trade, confirmation, affirmation, SSI, evidence pack, comms) — read-only.",
+    produces: "DisputeContext",
   },
   {
-    id: "route",
-    title: "4 · Route (switch)",
-    detail: "All matched → finalize · any break → human-in-the-loop approval.",
+    id: "intake",
+    title: "1 · Intake Agent",
+    detail:
+      "Classifies the dispute type, identifies the governing rule set, registers the case and computes routing.",
+    produces: "Dispute (case opened)",
   },
   {
-    id: "finalize",
-    title: "5a · Finalize matched",
-    detail: "Clean confirmations are confirmed immediately.",
-    branch: "matched",
+    id: "prediction",
+    title: "2 · Prediction Agent",
+    detail:
+      "Scores at-risk trades before affirmation & settlement cutoffs from match state, SSI status, historical fail patterns and counterparty profile.",
+    produces: "AgentFinding (risk score)",
+  },
+  {
+    id: "reconstruction",
+    title: "3 · Reconstruction / Evidence Agent",
+    detail:
+      "Assembles the full lifecycle into a canonical evidence pack and verifies the ledger digest.",
+    produces: "EvidencePack (+ digest_hash)",
+  },
+  {
+    id: "rootcause",
+    title: "4 · Root-Cause Agent",
+    detail:
+      "Diagnoses the break category and materially responsible party against the rule engine and similar-case corpus.",
+    produces: "AgentFinding (root cause)",
+  },
+  {
+    id: "remediation",
+    title: "5 · Remediation Agent",
+    detail:
+      "Drafts the chaser / cancel-rebook / economic adjustment proposal and the human-approval summary.",
+    produces: "AgentFinding (recommendation)",
   },
   {
     id: "approval",
-    title: "5b · Human approval",
-    detail: "A person approves, denies, or modifies the agent's proposed corrections.",
-    branch: "broken",
+    title: "6 · Orchestrator · human approval",
+    detail:
+      "Enforces human-in-the-loop: a person approves, modifies the resolution, or denies before anything is committed.",
+    produces: "—",
   },
   {
-    id: "report",
-    title: "6 · Apply & emit reconciled report",
-    detail: "Approved fixes are applied in memory, each pair is re-verified, and the report is emitted.",
+    id: "ledger",
+    title: "7 · Orchestrator · write ledger",
+    detail:
+      "Writes the ApprovalRecord and hashes each artifact into a simulated Azure Confidential Ledger (real SHA-256 digest, stubbed transaction id).",
+    produces: "ApprovalRecord, ACLReceipt",
   },
 ];
 
@@ -62,25 +81,19 @@ function computeStatuses(run: RunState | null): Record<string, StepStatus> {
   for (const step of STEPS) s[step.id] = "idle";
   if (!run) return s;
 
-  const hasBreaks =
-    run.pending.length > 0 || run.items.some((i) => !i.matched);
-
-  // By the time the server returns a state, ingest → agent → route have all run.
-  s.ingest = "done";
-  s.lookup = "done";
-  s.agent = "done";
-  s.route = "done";
+  // By the time the server returns a state, load → the 5 agents have all run.
+  s.load = "done";
+  s.intake = run.intake ? "done" : "idle";
+  s.prediction = run.prediction ? "done" : "idle";
+  s.reconstruction = run.reconstruction ? "done" : "idle";
+  s.rootcause = run.root_cause ? "done" : "idle";
+  s.remediation = run.remediation ? "done" : "idle";
 
   if (run.status === "awaiting_approval") {
     s.approval = "active";
   } else {
-    // completed
-    if (hasBreaks) {
-      s.approval = "done";
-    } else {
-      s.finalize = "done";
-    }
-    s.report = "done";
+    s.approval = "done";
+    s.ledger = "done";
   }
   return s;
 }
@@ -108,39 +121,30 @@ export default function WorkflowModal({ run, onClose }: Props) {
             Microsoft Agent Framework workflow (<code>build_workflow</code> in <code>main.py</code>).
             {run
               ? " The highlighted step is where this run currently sits."
-              : " Upload a CSV to walk a run through these stages."}
+              : " Select a dispute to walk a run through these stages."}
           </p>
           <ol className="wf-steps">
             {STEPS.map((step) => {
               const st = status[step.id];
               return (
-                <li
-                  key={step.id}
-                  className={`wf-step wf-${st}${step.branch ? ` wf-branch wf-${step.branch}` : ""}`}
-                >
+                <li key={step.id} className={`wf-step wf-${st}`}>
                   <span className="wf-marker" aria-hidden>
                     {st === "done" ? "✓" : st === "active" ? "▶" : "○"}
                   </span>
                   <div className="wf-body">
                     <div className="wf-title">
                       {step.title}
-                      {step.branch && (
-                        <span className={`badge ${step.branch === "matched" ? "badge-ok" : "badge-warn"}`}>
-                          {step.branch === "matched" ? "matched path" : "break path"}
-                        </span>
-                      )}
                       {st === "active" && <span className="badge badge-warn">current</span>}
                     </div>
                     <div className="wf-detail">{step.detail}</div>
+                    <div className="wf-produces">
+                      produces → <code>{step.produces}</code>
+                    </div>
                   </div>
                 </li>
               );
             })}
           </ol>
-          <p className="muted">
-            Nothing is ever written back to the ledger tables — corrections are applied to an in-memory
-            copy purely to produce the reconciled report.
-          </p>
         </div>
       </div>
     </div>

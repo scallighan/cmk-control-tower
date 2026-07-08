@@ -1,277 +1,228 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AssessedItem,
   DecisionAction,
-  FieldSuggestion,
-  PendingApproval,
+  DisputeSummary,
   RunState,
+  StageEvent,
+  listDisputes,
+  openRunStream,
   startRun,
   submitDecision,
 } from "./api";
-import ConfirmationModal from "./ConfirmationModal";
+import RunView from "./RunView";
 import WorkflowModal from "./WorkflowModal";
 
-interface EditableSuggestion extends FieldSuggestion {
-  dropped: boolean;
+function fmtUsd(v: string | number | null | undefined): string {
+  if (v === null || v === undefined || v === "") return "—";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 }
 
+function fmtPct(v: string | number | null | undefined): string {
+  if (v === null || v === undefined || v === "") return "—";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  return `${Math.round(n * 100)}%`;
+}
+
+const RESOLUTION_OPTIONS = [
+  "ADJUSTED",
+  "REBOOKED",
+  "CLAIMED",
+  "WRITTEN_OFF",
+  "BUY_IN",
+  "NO_ACTION",
+];
+
 export default function App() {
-  const [file, setFile] = useState<File | null>(null);
+  const [disputes, setDisputes] = useState<DisputeSummary[]>([]);
+  const [loadingList, setLoadingList] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
+
   const [run, setRun] = useState<RunState | null>(null);
-  const [edits, setEdits] = useState<EditableSuggestion[]>([]);
+  const [activeDispute, setActiveDispute] = useState<DisputeSummary | null>(null);
+  const [stages, setStages] = useState<Record<string, StageEvent>>({});
+  const [streaming, setStreaming] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [detailId, setDetailId] = useState<string | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
   const [showWorkflow, setShowWorkflow] = useState(false);
-  const fileInput = useRef<HTMLInputElement>(null);
+  const streamCloser = useRef<(() => void) | null>(null);
 
-  const pending: PendingApproval | undefined = run?.pending[0];
+  useEffect(() => {
+    let active = true;
+    listDisputes()
+      .then((d) => active && setDisputes(d))
+      .catch((e) => active && setListError((e as Error).message))
+      .finally(() => active && setLoadingList(false));
+    return () => {
+      active = false;
+    };
+  }, []);
 
-  const detailItem = useMemo(
-    () => run?.items.find((i) => i.trade_id === detailId) ?? null,
-    [run, detailId]
-  );
+  // Tear down any live stream on unmount.
+  useEffect(() => () => streamCloser.current?.(), []);
 
-  function loadEdits(approval: PendingApproval | undefined) {
-    setEdits((approval?.suggestions ?? []).map((s) => ({ ...s, dropped: false })));
-  }
+  const filerCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    disputes.forEach((d) => m.set(d.category, (m.get(d.category) ?? 0) + 1));
+    return m;
+  }, [disputes]);
 
-  async function onStart() {
-    if (!file) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const state = await startRun(file);
-      setRun(state);
-      loadEdits(state.pending[0]);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onDecision(action: DecisionAction) {
-    if (!run || !pending) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const modified: FieldSuggestion[] =
-        action === "modify"
-          ? edits.filter((e) => !e.dropped).map(({ dropped: _dropped, ...s }) => s)
-          : [];
-      const state = await submitDecision(run.run_id, pending.request_id, action, modified);
-      setRun(state);
-      loadEdits(state.pending[0]);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function updateEdit(index: number, value: string) {
-    setEdits((prev) => prev.map((e, i) => (i === index ? { ...e, suggested_value: value } : e)));
-  }
-
-  function toggleDrop(index: number) {
-    setEdits((prev) => prev.map((e, i) => (i === index ? { ...e, dropped: !e.dropped } : e)));
-  }
-
-  function reset() {
+  async function openDispute(d: DisputeSummary) {
+    streamCloser.current?.();
+    setActiveDispute(d);
     setRun(null);
-    setEdits([]);
-    setFile(null);
-    setError(null);
-    if (fileInput.current) fileInput.current.value = "";
+    setStages({});
+    setRunError(null);
+    setStreaming(true);
+    try {
+      const created = await startRun(d.dispute_id);
+      streamCloser.current = openRunStream(created.run_id, {
+        onStage: (ev) =>
+          setStages((prev) => ({
+            ...prev,
+            [ev.stage]:
+              ev.phase === "done"
+                ? ev
+                : // keep any previously captured input/output while re-processing
+                  { ...prev[ev.stage], ...ev },
+          })),
+        onState: (state) => {
+          setRun(state);
+          setStreaming(false);
+        },
+        onError: (message) => {
+          setRunError(message);
+          setStreaming(false);
+        },
+      });
+    } catch (e) {
+      setRunError((e as Error).message);
+      setStreaming(false);
+    }
   }
 
-  const matched = run?.items.filter((i) => i.matched) ?? [];
-  const broken = run?.items.filter((i) => !i.matched) ?? [];
+  async function decide(action: DecisionAction, finalResolution?: string, note = "") {
+    if (!run || run.pending.length === 0) return;
+    const pending = run.pending[0];
+    setBusy(true);
+    setRunError(null);
+    try {
+      setRun(await submitDecision(run.run_id, pending.request_id, action, finalResolution, note));
+    } catch (e) {
+      setRunError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function backToQueue() {
+    streamCloser.current?.();
+    streamCloser.current = null;
+    setRun(null);
+    setActiveDispute(null);
+    setStages({});
+    setStreaming(false);
+    setRunError(null);
+  }
 
   return (
-    <div className="page">
-      <header>
-        <h1>CMK Control Tower</h1>
-        <p className="subtitle">
-          Upload counterparty confirmations · an agent reconciles them against the booked ledger trades
-        </p>
+    <div className="app">
+      <header className="app-header">
+        <div>
+          <h1>CMK Control Tower</h1>
+          <p className="subtitle">
+            Counterparty dispute resolution · Microsoft Agent Framework · human-in-the-loop
+          </p>
+        </div>
         <button className="ghost" onClick={() => setShowWorkflow(true)}>
           Show agent workflow
         </button>
       </header>
 
-      <section className="controls">
-        <label className="file-picker">
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".csv,text/csv"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            disabled={busy || !!run}
-          />
-          <span>{file ? file.name : "Choose confirmations CSV…"}</span>
-        </label>
-        <button onClick={onStart} disabled={busy || !file || !!run}>
-          {busy && !run ? "Reconciling…" : "Reconcile confirmations"}
-        </button>
-        {run && <span className="run-id">run: {run.run_id}</span>}
-      </section>
-
-      {error && <div className="error">⚠ {error}</div>}
-
-      {run && (
+      {!activeDispute ? (
         <section className="panel">
           <h2>
-            Agent assessment
-            <span className="badge badge-ok">{matched.length} matched</span>
-            <span className="badge badge-warn">{broken.length} break(s)</span>
+            Open dispute queue
+            {!loadingList && <span className="badge badge-warn">{disputes.length} open</span>}
           </h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Trade</th>
-                <th>Source</th>
-                <th>Verdict</th>
-                <th>cfm_price</th>
-                <th>cfm_qty</th>
-                <th>cfm_gross</th>
-                <th>Agent summary</th>
-              </tr>
-            </thead>
-            <tbody>
-              {run.items.map((item: AssessedItem) => (
-                <tr key={item.trade_id} className={item.matched ? "" : "row-break"}>
-                  <td>
-                    <button className="link" onClick={() => setDetailId(item.trade_id)}>
-                      {item.trade_id}
-                    </button>
-                  </td>
-                  <td>{item.source}</td>
-                  <td>
-                    <span className={`badge ${item.matched ? "badge-ok" : "badge-warn"}`}>
-                      {item.matched ? "matched" : "break"}
-                    </span>
-                  </td>
-                  <td className="mono">{String(item.confirmation.cfm_price ?? "")}</td>
-                  <td className="mono">{String(item.confirmation.cfm_qty ?? "")}</td>
-                  <td className="mono">{String(item.confirmation.cfm_gross ?? "")}</td>
-                  <td className="reason">{item.summary}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {run.unknown_trade_ids.length > 0 && (
-            <p className="muted">
-              Skipped {run.unknown_trade_ids.length} row(s) with no booked trade:{" "}
-              {run.unknown_trade_ids.join(", ")}
-            </p>
-          )}
-        </section>
-      )}
-
-      {run && pending && (
-        <section className="panel">
-          <h2>
-            Human review required
-            <span className="badge badge-warn">{pending.suggestions.length} proposed correction(s)</span>
-          </h2>
-
-          {pending.summaries.length > 0 && (
-            <ul className="break-summary">
-              {pending.summaries.map((s) => (
-                <li key={s.trade_id}>
-                  <button className="link" onClick={() => setDetailId(s.trade_id)}>
-                    {s.trade_id}
-                  </button>{" "}
-                  — {s.summary}
-                </li>
-              ))}
-            </ul>
-          )}
-
-          {pending.suggestions.length === 0 ? (
-            <p>The agent could not propose any corrections. You can only deny.</p>
+          <p className="muted">
+            Live from the <code>cmk-sqldb-ledger</code> SQL ledger. Select a dispute to launch the
+            five-agent pipeline (Intake → Prediction → Reconstruction → Root-Cause → Remediation) and
+            route it through orchestrator approval.
+          </p>
+          {listError && <div className="error">⚠ {listError}</div>}
+          {loadingList ? (
+            <p className="muted">Loading disputes…</p>
           ) : (
-            <table>
+            <table className="grid">
               <thead>
                 <tr>
-                  <th>Trade</th>
-                  <th>Field</th>
-                  <th>Current</th>
-                  <th>Suggested (editable)</th>
-                  <th>Reason</th>
-                  <th>Drop</th>
+                  <th>Dispute</th>
+                  <th>Category</th>
+                  <th>Notional</th>
+                  <th>Filed by</th>
+                  <th>Security</th>
+                  <th>Evidence</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
-                {edits.map((s, i) => (
-                  <tr key={`${s.trade_id}-${s.field}`} className={s.dropped ? "dropped" : ""}>
+                {disputes.map((d) => (
+                  <tr key={d.dispute_id}>
+                    <td className="mono">{d.dispute_id}</td>
                     <td>
-                      <button className="link" onClick={() => setDetailId(s.trade_id)}>
-                        {s.trade_id}
+                      <span className="badge badge-cat">{d.category}</span>
+                    </td>
+                    <td className="mono">{fmtUsd(d.notional_usd)}</td>
+                    <td>{d.filer_name ?? d.filer_cp_id ?? "—"}</td>
+                    <td>
+                      {d.ticker ? (
+                        <span>
+                          {d.ticker} <span className="muted">· {d.side}</span>
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td>
+                      <span className={`badge ${Number(d.completeness_pct) >= 0.9 ? "badge-ok" : "badge-warn"}`}>
+                        {fmtPct(d.completeness_pct)}
+                      </span>
+                    </td>
+                    <td>
+                      <button className="primary sm" onClick={() => openDispute(d)}>
+                        Run agents →
                       </button>
-                    </td>
-                    <td><code>{s.field}</code></td>
-                    <td className="mono">{s.current_value}</td>
-                    <td>
-                      <input
-                        className="mono"
-                        value={s.suggested_value}
-                        onChange={(e) => updateEdit(i, e.target.value)}
-                        disabled={busy || s.dropped}
-                      />
-                    </td>
-                    <td className="reason">{s.reason}</td>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={s.dropped}
-                        onChange={() => toggleDrop(i)}
-                        disabled={busy}
-                      />
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           )}
-
-          <div className="actions">
-            <button className="approve" onClick={() => onDecision("approve")} disabled={busy}>
-              Approve as suggested
-            </button>
-            <button
-              className="modify"
-              onClick={() => onDecision("modify")}
-              disabled={busy || pending.suggestions.length === 0}
-            >
-              Apply my edits
-            </button>
-            <button className="deny" onClick={() => onDecision("deny")} disabled={busy}>
-              Deny all
-            </button>
-          </div>
-        </section>
-      )}
-
-      {run && run.status === "completed" && (
-        <section className="panel">
-          <h2>
-            Reconciliation complete
-            <span className="badge badge-ok">done</span>
-          </h2>
-          {run.outputs.length === 0 ? (
-            <p>No output produced.</p>
-          ) : (
-            run.outputs.map((out, i) => <pre key={i} className="output">{out}</pre>)
+          {!loadingList && filerCounts.size > 0 && (
+            <p className="muted">
+              By category:{" "}
+              {[...filerCounts.entries()]
+                .sort((a, b) => b[1] - a[1])
+                .map(([k, v]) => `${k} (${v})`)
+                .join(" · ")}
+            </p>
           )}
-          <button onClick={reset}>Start another run</button>
         </section>
-      )}
-
-      {detailItem && (
-        <ConfirmationModal item={detailItem} onClose={() => setDetailId(null)} />
+      ) : (
+        <RunView
+          dispute={activeDispute}
+          run={run}
+          stages={stages}
+          streaming={streaming}
+          busy={busy}
+          error={runError}
+          resolutionOptions={RESOLUTION_OPTIONS}
+          onBack={backToQueue}
+          onDecide={decide}
+        />
       )}
 
       {showWorkflow && <WorkflowModal run={run} onClose={() => setShowWorkflow(false)} />}

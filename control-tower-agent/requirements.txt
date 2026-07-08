@@ -5,3 +5,4 @@ pydantic
 pyodbc
 fastapi
 uvicorn[standard]
+fastmcp
