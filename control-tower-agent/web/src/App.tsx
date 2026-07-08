@@ -5,6 +5,7 @@ import {
   RunState,
   StageEvent,
   listDisputes,
+  openRerunStream,
   openRunStream,
   startRun,
   submitDecision,
@@ -45,6 +46,7 @@ export default function App() {
   const [stages, setStages] = useState<Record<string, StageEvent>>({});
   const [streaming, setStreaming] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [revisedStages, setRevisedStages] = useState<Set<string>>(new Set());
   const [runError, setRunError] = useState<string | null>(null);
   const [showWorkflow, setShowWorkflow] = useState(false);
   const streamCloser = useRef<(() => void) | null>(null);
@@ -74,6 +76,7 @@ export default function App() {
     setActiveDispute(d);
     setRun(null);
     setStages({});
+    setRevisedStages(new Set());
     setRunError(null);
     setStreaming(true);
     try {
@@ -117,6 +120,37 @@ export default function App() {
     }
   }
 
+  // Kick off a live, streamed rerun of a step (and everything downstream) that the
+  // Review Assistant requested. Reuses the pipeline-card update path so the affected
+  // agents visibly re-process, and marks the re-run stages as "revised" for highlight.
+  function rerun(stage: string, feedback: string) {
+    if (!run || streaming) return;
+    streamCloser.current?.();
+    setRevisedStages(new Set());
+    setRunError(null);
+    setStreaming(true);
+    streamCloser.current = openRerunStream(run.run_id, stage, feedback, {
+      onStage: (ev) => {
+        if (ev.revised) setRevisedStages((prev) => new Set(prev).add(ev.stage));
+        setStages((prev) => ({
+          ...prev,
+          [ev.stage]:
+            ev.phase === "done"
+              ? ev
+              : { ...prev[ev.stage], ...ev },
+        }));
+      },
+      onState: (state) => {
+        setRun(state);
+        setStreaming(false);
+      },
+      onError: (message) => {
+        setRunError(message);
+        setStreaming(false);
+      },
+    });
+  }
+
   function backToQueue() {
     streamCloser.current?.();
     streamCloser.current = null;
@@ -124,6 +158,7 @@ export default function App() {
     setActiveDispute(null);
     setStages({});
     setStreaming(false);
+    setRevisedStages(new Set());
     setRunError(null);
   }
 
@@ -222,6 +257,8 @@ export default function App() {
           resolutionOptions={RESOLUTION_OPTIONS}
           onBack={backToQueue}
           onDecide={decide}
+          revisedStages={revisedStages}
+          onRerun={rerun}
         />
       )}
 

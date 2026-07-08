@@ -316,3 +316,74 @@ def create_remediation_agent() -> Agent:
         RemediationResult,
         tools=tools,
     )
+
+
+# ---------------------------------------------------------------------------
+# Conversational review assistant.
+#
+# Unlike the five specialist agents, this agent returns free-form text (no
+# response_format) and holds a multi-turn conversation with the human reviewer
+# about a single dispute that is paused at the approval gate. The full run
+# snapshot (every agent's findings + the pending proposal) is supplied inline;
+# the read-only ledger tools let it verify or fetch extra detail on demand.
+# ---------------------------------------------------------------------------
+CONVERSATION_TOOLS = [
+    "get_dispute_record",
+    "get_analytic_signals",
+    "get_trade_lifecycle",
+    "get_evidence_pack",
+    "verify_acl_proof",
+    "query_dispute_data",
+]
+
+
+def create_conversation_agent(rerun_tool: Any = None) -> Agent:
+    """A plain-text analyst assistant for discussing a dispute pending approval.
+
+    ``rerun_tool`` is an optional per-run ``FunctionTool`` (built by the server and
+    bound to the specific run's workflow state) that lets the assistant re-run a
+    pipeline step with the reviewer's feedback on their behalf.
+    """
+    mcp = _mcp_tool("ledger_dispute_assistant", CONVERSATION_TOOLS)
+    tools: list[Any] = []
+    if mcp is not None:
+        tools.append(mcp)
+    if rerun_tool is not None:
+        tools.append(rerun_tool)
+    instructions = (
+        "You are the CMK Control Tower review assistant. You help a human operations "
+        "reviewer understand a single counterparty dispute that is paused at the "
+        "human-in-the-loop approval gate, so they can make an informed approve / deny / "
+        "modify decision.\n\n"
+        "You are given a JSON snapshot of the whole agent run: the dispute record and "
+        "trade, and each specialist agent's structured findings — Intake (classification, "
+        "severity, routing), Prediction (pre-cutoff settlement risk + signals), "
+        "Reconstruction (6-artifact evidence pack + ledger/ACL proof), Root-Cause "
+        "(primary break type + recommended resolution) and Remediation (the proposed "
+        "action, amount, draft communication and the pending approval request).\n\n"
+        + (_WITH_TOOLS if MCP_SERVER_URL else _NO_TOOLS) +
+        "\n\nAnswer the reviewer's questions specifically and concisely. Explain what each "
+        "workflow step did and WHY it reached its conclusion, citing concrete numbers from "
+        "the findings (risk scores, break amounts, completeness %, timing breaches, "
+        "counterparty history). Surface risks, gaps and anything that warrants caution.\n\n"
+        "When the reviewer disagrees with a step or wants to test a different assumption, "
+        "re-run that step for them with the `rerun_step` tool: pass the step name "
+        "(intake, prediction, reconstruction, root_cause, or remediation) and a clear "
+        "`feedback` string that captures the reviewer's intent in your own words. Calling "
+        "the tool kicks off the rerun live in the main pipeline view — the affected step "
+        "and every downstream step visibly re-process and are highlighted as revised. If "
+        "the reviewer's intent is clear, just call it (don't ask permission); if it's "
+        "ambiguous which step or what change they mean, ask one brief clarifying question "
+        "first. After you call it, tell the reviewer to watch the pipeline update and that "
+        "you'll discuss the revised result once it lands. Only re-run when the reviewer "
+        "clearly wants a change — never to approve or execute anything. You never "
+        "approve, deny, or execute the remediation yourself; the human decides at the gate "
+        "and the orchestrator writes the ledger.\n\n"
+        "Keep answers focused; use short paragraphs or bullet points."
+    )
+    return Agent(
+        client=_client(),
+        instructions=instructions,
+        name="dispute_assistant",
+        tools=tools or None,
+    )

@@ -22,8 +22,9 @@ import dataclasses
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Literal
+from typing import Annotated, Any, AsyncIterator, Literal
 
+from agent_framework import tool
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +33,7 @@ from pydantic import BaseModel
 
 import db
 import main as pipeline
+import agents as ag
 from artifacts import HumanDecision
 
 load_dotenv()
@@ -58,6 +60,15 @@ class RunSession:
         self.workflow = pipeline.build_workflow()
         self.result: Any = None
         self.started = False  # guards the one-shot streaming run
+        # Conversational review assistant (lazily created on first chat turn).
+        self.chat_agent: Any = None
+        self.chat_session: Any = None
+        self.chat_log: list[dict[str, str]] = []  # [{role, content}] for the UI
+        self.chat_context_dirty = True  # re-inject the run snapshot on the next chat turn
+        # Set by the rerun tool during a chat turn: {"stage", "feedback"}. The UI
+        # picks this up and drives a live, streamed rerun of the pipeline.
+        self.pending_rerun: dict[str, str] | None = None
+        self.chat_lock = asyncio.Lock()  # serialize chat/rerun mutations of state
 
 
 RUNS: dict[str, RunSession] = {}
@@ -77,6 +88,28 @@ class DecisionRequest(BaseModel):
     approver: str = "ops_analyst"
     final_resolution: str | None = None
     note: str = ""
+
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class RerunSignal(BaseModel):
+    stage: str
+    feedback: str
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    history: list[ChatMessage]
+    # Present only when the assistant asked (via its tool) to re-run a step, so the
+    # UI can drive a live, streamed rerun of the pipeline from the main view.
+    rerun: RerunSignal | None = None
 
 
 class RunState(BaseModel):
@@ -131,9 +164,13 @@ def _serialize_state(session: RunSession) -> RunState:
 
     pending: list[PendingApproval] = []
     if session.result is not None:
+        # The approval payload is rebuilt on the fly whenever a stage is re-run
+        # (see /rerun), so prefer the version persisted in workflow state; fall
+        # back to the request captured by MAF when the run first suspended.
+        state_req = get(pipeline.APPROVAL_REQUEST_STATE_KEY)
         for event in session.result.get_request_info_events():
             pending.append(
-                PendingApproval(request_id=event.request_id, request=_dump(event.data))
+                PendingApproval(request_id=event.request_id, request=state_req or _dump(event.data))
             )
 
     outputs = list(session.result.get_outputs()) if session.result is not None else []
@@ -293,6 +330,183 @@ async def submit_decision(run_id: str, body: DecisionRequest) -> RunState:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Pipeline resume failed: {exc}") from exc
     return _serialize_state(session)
+
+
+# ---------------------------------------------------------------------------
+# Conversational review assistant + step rerun (available while a run waits at
+# the human-in-the-loop approval gate).
+# ---------------------------------------------------------------------------
+def _chat_history(session: RunSession) -> list[ChatMessage]:
+    return [ChatMessage(role=m["role"], content=m["content"]) for m in session.chat_log]  # type: ignore[arg-type]
+
+
+def _build_rerun_tool(session: RunSession):
+    """A per-run FunctionTool that lets the review assistant *request* a step rerun.
+
+    It does not run anything itself — it records the request on the session so the
+    chat endpoint can hand it back to the UI, which then drives a live, streamed
+    rerun in the main pipeline view (visible re-processing + highlighted changes).
+    The human never leaves the approval gate.
+    """
+
+    @tool(
+        name="rerun_step",
+        description=(
+            "Re-run one specialist step of THIS dispute's pipeline with the reviewer's "
+            "feedback, followed by every downstream step, to test a different assumption. "
+            "Calling this KICKS OFF the rerun live in the main pipeline view — the affected "
+            "agents visibly re-process and the changed steps are highlighted. Use it only "
+            "when the reviewer wants to change or re-test a step's conclusion. It never "
+            "approves, denies, or executes anything."
+        ),
+    )
+    async def rerun_step(
+        stage: Annotated[
+            str,
+            "Which step to re-run: one of intake, prediction, reconstruction, root_cause, remediation.",
+        ],
+        feedback: Annotated[
+            str,
+            "Clear guidance capturing the reviewer's intent, in your own words (e.g. 'treat the "
+            "SSI snapshot as stale' or 'this is a fee break, not economic').",
+        ] = "",
+    ) -> str:
+        norm = (stage or "").strip().lower()
+        if norm not in pipeline.STAGE_SEQUENCE:
+            return (
+                f"Invalid stage '{stage}'. Choose one of: {', '.join(pipeline.STAGE_SEQUENCE)}."
+            )
+        downstream = pipeline.STAGE_SEQUENCE[pipeline.STAGE_SEQUENCE.index(norm):]
+        session.pending_rerun = {"stage": norm, "feedback": feedback or ""}
+        return json.dumps(
+            {
+                "status": "rerun_started",
+                "stage": norm,
+                "also_reruns": downstream[1:],
+                "note": (
+                    "The rerun is now running live in the main pipeline view; the affected "
+                    "steps will re-process and be highlighted as revised."
+                ),
+            },
+            default=str,
+        )
+
+    return rerun_step
+
+
+@app.get("/api/runs/{run_id}/chat", response_model=list[ChatMessage])
+async def get_chat(run_id: str) -> list[ChatMessage]:
+    session = RUNS.get(run_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return _chat_history(session)
+
+
+@app.post("/api/runs/{run_id}/chat", response_model=ChatResponse)
+async def post_chat(run_id: str, body: ChatRequest) -> ChatResponse:
+    session = RUNS.get(run_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Empty message")
+    if session.result is None:
+        raise HTTPException(
+            status_code=409,
+            detail="The agents are still running — wait for the run to reach the approval gate.",
+        )
+
+    async with session.chat_lock:
+        if session.chat_agent is None:
+            session.chat_agent = ag.create_conversation_agent(rerun_tool=_build_rerun_tool(session))
+            session.chat_session = session.chat_agent.create_session()
+
+        # Re-inject the run snapshot on the first turn and after any rerun so the
+        # assistant always reasons over the current findings; otherwise the MAF
+        # session already carries the earlier context, so send just the question.
+        if session.chat_context_dirty or not session.chat_log:
+            snapshot = pipeline.build_conversation_snapshot(session.workflow._state)  # noqa: SLF001
+            user_input = (
+                "Current snapshot of the dispute run you are assisting with — the dispute, trade, "
+                "every agent's findings, and the pending approval proposal — as JSON:\n\n"
+                + json.dumps(snapshot, default=str)
+                + "\n\nUse this as the ground truth for my questions.\n\nQuestion: "
+                + message
+            )
+            session.chat_context_dirty = False
+        else:
+            user_input = message
+
+        session.pending_rerun = None
+        try:
+            response = await session.chat_agent.run(user_input, session=session.chat_session)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Assistant failed: {exc}") from exc
+
+        reply = (getattr(response, "text", "") or "").strip() or "(no response)"
+        session.chat_log.append({"role": "user", "content": message})
+        session.chat_log.append({"role": "assistant", "content": reply})
+        # If the assistant asked to re-run a step, hand the request back so the UI
+        # can drive the streamed rerun in the main pipeline view.
+        signal = RerunSignal(**session.pending_rerun) if session.pending_rerun else None
+        return ChatResponse(reply=reply, history=_chat_history(session), rerun=signal)
+
+
+async def _rerun_event_stream(session: RunSession, stage: str, feedback: str) -> AsyncIterator[str]:
+    """Stream a live rerun of ``stage`` + downstream stages as SSE frames.
+
+    Emits ``stage`` frames (processing → done, flagged ``revised``) for each stage
+    that re-runs, then rebuilds the approval proposal and emits a terminal
+    ``state`` frame with the refreshed RunState. Mirrors the initial run stream so
+    the frontend can reuse its stage-card update path.
+    """
+    stage = (stage or "").strip().lower()
+    if stage not in pipeline.STAGE_SEQUENCE:
+        yield _sse("run_error", {"message": f"Unknown stage '{stage}'."})
+        return
+
+    async with session.chat_lock:
+        state = session.workflow._state  # noqa: SLF001
+        seq = pipeline.STAGE_SEQUENCE[pipeline.STAGE_SEQUENCE.index(stage):]
+        try:
+            for s in seq:
+                yield _sse("stage", {"stage": s, "phase": "processing", "revised": True})
+                await pipeline._rerun_one(state, s, feedback if s == stage else "")  # noqa: SLF001
+                io = (state.get(pipeline.STAGE_IO_STATE_KEY) or {}).get(s, {})
+                yield _sse(
+                    "stage",
+                    {
+                        "stage": s,
+                        "phase": "done",
+                        "input": io.get("input"),
+                        "output": io.get("output"),
+                        "revised": True,
+                    },
+                )
+            pipeline.rebuild_approval_request(state)
+        except Exception as exc:  # noqa: BLE001
+            yield _sse("run_error", {"message": f"Rerun failed: {exc}"})
+            return
+        # The assistant should reason over the refreshed findings on its next turn.
+        session.chat_context_dirty = True
+    yield _sse("state", _serialize_state(session).model_dump())
+
+
+@app.get("/api/runs/{run_id}/rerun/stream")
+async def rerun_stream(run_id: str, stage: str, feedback: str = "") -> StreamingResponse:
+    session = RUNS.get(run_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if session.result is None or not session.result.get_request_info_events():
+        raise HTTPException(
+            status_code=409,
+            detail="Re-running a step is only available while the dispute is awaiting approval.",
+        )
+    return StreamingResponse(
+        _rerun_event_stream(session, stage, feedback),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/trades/{trade_id}")

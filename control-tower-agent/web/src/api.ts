@@ -212,6 +212,8 @@ export interface StageEvent {
   phase: "processing" | "done";
   input?: unknown;
   output?: unknown;
+  // Set on frames from a rerun stream so the UI can highlight the revised steps.
+  revised?: boolean;
 }
 
 export interface DisputeContext {
@@ -220,6 +222,24 @@ export interface DisputeContext {
 }
 
 export type DecisionAction = "approve" | "deny" | "modify";
+
+// Conversational review assistant.
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ChatResponse {
+  reply: string;
+  history: ChatMessage[];
+  // Present when the assistant asked to re-run a step — the UI drives the live rerun.
+  rerun?: RerunSignal;
+}
+
+export interface RerunSignal {
+  stage: string;
+  feedback: string;
+}
 
 export interface TradeDetail {
   trade: Record<string, unknown> | null;
@@ -300,6 +320,49 @@ export function openRunStream(runId: string, handlers: RunStreamHandlers): () =>
   return close;
 }
 
+/**
+ * Opens an SSE stream that re-runs `stage` (and every downstream stage) live,
+ * dispatching the same stage/state/error frames as {@link openRunStream} so the
+ * caller can reuse its pipeline-card update path. Stage frames carry `revised`.
+ * Returns a disposer that closes the underlying EventSource.
+ */
+export function openRerunStream(
+  runId: string,
+  stage: string,
+  feedback: string,
+  handlers: RunStreamHandlers
+): () => void {
+  const qs = new URLSearchParams({ stage, feedback });
+  const es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/rerun/stream?${qs}`);
+  let closed = false;
+  const close = () => {
+    if (!closed) {
+      closed = true;
+      es.close();
+    }
+  };
+
+  es.addEventListener("stage", (e) => {
+    handlers.onStage(JSON.parse((e as MessageEvent).data) as StageEvent);
+  });
+  es.addEventListener("state", (e) => {
+    handlers.onState(JSON.parse((e as MessageEvent).data) as RunState);
+    close(); // terminal frame — stop before EventSource auto-reconnects
+  });
+  es.addEventListener("run_error", (e) => {
+    handlers.onError((JSON.parse((e as MessageEvent).data) as { message: string }).message);
+    close();
+  });
+  es.onerror = () => {
+    if (!closed) {
+      handlers.onError("Lost connection to the rerun stream.");
+      close();
+    }
+  };
+
+  return close;
+}
+
 export async function getRun(runId: string): Promise<RunState> {
   const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`);
   return handle<RunState>(res);
@@ -328,4 +391,20 @@ export async function submitDecision(
 export async function getTradeDetail(tradeId: string): Promise<TradeDetail> {
   const res = await fetch(`/api/trades/${encodeURIComponent(tradeId)}`);
   return handle<TradeDetail>(res);
+}
+
+/** Full chat transcript for a run (used to restore the conversation on reload). */
+export async function getChat(runId: string): Promise<ChatMessage[]> {
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/chat`);
+  return handle<ChatMessage[]>(res);
+}
+
+/** Send a message to the review assistant; returns the reply + full history. */
+export async function sendChat(runId: string, message: string): Promise<ChatResponse> {
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  return handle<ChatResponse>(res);
 }

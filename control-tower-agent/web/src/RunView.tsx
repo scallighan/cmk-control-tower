@@ -1,5 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
+  ChatMessage,
   DecisionAction,
   DisputeSummary,
   DraftCommunication,
@@ -11,6 +14,8 @@ import {
   RunState,
   StageEvent,
   StageName,
+  getChat,
+  sendChat,
 } from "./api";
 import TradeModal from "./TradeModal";
 
@@ -24,6 +29,8 @@ interface Props {
   resolutionOptions: string[];
   onBack: () => void;
   onDecide: (action: DecisionAction, finalResolution?: string, note?: string) => void;
+  revisedStages: Set<string>;
+  onRerun: (stage: string, feedback: string) => void;
 }
 
 type Phase = "pending" | "processing" | "done";
@@ -123,6 +130,7 @@ function StageCard({
   phase,
   status,
   io,
+  revised,
   children,
 }: {
   step: string;
@@ -130,22 +138,177 @@ function StageCard({
   phase: Phase;
   status?: React.ReactNode;
   io?: { input?: unknown; output?: unknown };
+  revised?: boolean;
   children?: React.ReactNode;
 }) {
   return (
-    <div className={`agent-card phase-${phase}`}>
+    <div className={`agent-card phase-${phase}${revised ? " revised" : ""}`}>
       <div className="agent-card-head">
         <span className="agent-step">{step}</span>
         <h3>{title}</h3>
+        {revised && phase !== "processing" && <span className="badge badge-revised">revised</span>}
         <PhaseBadge phase={phase} extra={phase === "done" ? status : undefined} />
       </div>
-      {phase === "processing" && <div className="agent-card-body muted">Working…</div>}
+      {phase === "processing" && (
+        <div className="agent-card-body muted">{revised ? "Re-running…" : "Working…"}</div>
+      )}
       {phase === "done" && (
         <div className="agent-card-body">
           {children}
           <IODetails io={io} />
         </div>
       )}
+    </div>
+  );
+}
+
+// Conversational review assistant for the dispute currently at the approval
+// gate. Renders as a floating widget pinned to the lower-right corner: a
+// launcher button that opens a popup chat window. Restores its transcript from
+// the server on mount.
+function ChatPanel({
+  runId,
+  onRerun,
+}: {
+  runId: string;
+  onRerun: (stage: string, feedback: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const logRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getChat(runId)
+      .then((h) => active && setMessages(h))
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [runId]);
+
+  useEffect(() => {
+    if (open) logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+  }, [messages, sending, open]);
+
+  async function send(text: string) {
+    const msg = text.trim();
+    if (!msg || sending) return;
+    setSending(true);
+    setErr(null);
+    setInput("");
+    setMessages((m) => [...m, { role: "user", content: msg }]);
+    try {
+      const res = await sendChat(runId, msg);
+      setMessages(res.history);
+      // The assistant requested a step rerun via its tool — drive it in the main view.
+      if (res.rerun) onRerun(res.rerun.stage, res.rerun.feedback);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  const suggestions = [
+    "Summarize what each step concluded.",
+    "Why this recommended resolution?",
+    "What are the biggest risks if I approve?",
+    "Is the ledger proof trustworthy here?",
+    "Re-run the root cause treating this as a fee break, not economic.",
+  ];
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="chat-fab"
+        onClick={() => setOpen(true)}
+        aria-label="Open review assistant"
+      >
+        <span className="chat-fab-icon" aria-hidden>
+          💬
+        </span>
+        Review assistant
+      </button>
+    );
+  }
+
+  return (
+    <div className="chat-widget" role="dialog" aria-label="Review assistant">
+      <div className="chat-widget-head">
+        <div>
+          <strong>Review assistant</strong>
+          <span className="badge badge-cat">ask about this dispute</span>
+        </div>
+        <button
+          type="button"
+          className="chat-close"
+          onClick={() => setOpen(false)}
+          aria-label="Minimize review assistant"
+        >
+          ×
+        </button>
+      </div>
+      <div className="chat-log" ref={logRef}>
+        {messages.length === 0 && !sending && (
+          <div className="chat-empty muted">
+            Ask about what each step did, probe the evidence, or pressure-test the proposal before
+            you decide. The assistant sees the full run and can query the read-only ledger.
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} className={`chat-msg chat-${m.role}`}>
+            <span className="chat-role">{m.role === "user" ? "You" : "Assistant"}</span>
+            {m.role === "assistant" ? (
+              <div className="chat-bubble chat-markdown">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+              </div>
+            ) : (
+              <div className="chat-bubble">{m.content}</div>
+            )}
+          </div>
+        ))}
+        {sending && (
+          <div className="chat-msg chat-assistant">
+            <span className="chat-role">Assistant</span>
+            <div className="chat-bubble muted">
+              <span className="spinner" aria-hidden /> thinking…
+            </div>
+          </div>
+        )}
+      </div>
+      {messages.length === 0 && (
+        <div className="chat-suggestions">
+          {suggestions.map((s) => (
+            <button key={s} type="button" className="ghost sm" disabled={sending} onClick={() => send(s)}>
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+      {err && <div className="error">⚠ {err}</div>}
+      <form
+        className="chat-input-row"
+        onSubmit={(e) => {
+          e.preventDefault();
+          send(input);
+        }}
+      >
+        <input
+          type="text"
+          value={input}
+          placeholder="Ask about this dispute…"
+          disabled={sending}
+          onChange={(e) => setInput(e.target.value)}
+        />
+        <button type="submit" className="primary" disabled={sending || !input.trim()}>
+          Send
+        </button>
+      </form>
     </div>
   );
 }
@@ -160,6 +323,8 @@ export default function RunView({
   resolutionOptions,
   onBack,
   onDecide,
+  revisedStages,
+  onRerun,
 }: Props) {
   const [showTrade, setShowTrade] = useState(false);
   const pending = run?.pending[0] ?? null;
@@ -240,6 +405,7 @@ export default function RunView({
           step="1"
           title="Intake Agent"
           phase={phaseOf("intake", !!intake)}
+          revised={revisedStages.has("intake")}
           io={stageIO("intake")}
           status={intake && <span className={`badge ${sevClass(intake.severity)}`}>{intake.severity}</span>}
         >
@@ -261,6 +427,7 @@ export default function RunView({
           step="2"
           title="Prediction Agent"
           phase={phaseOf("prediction", !!prediction)}
+          revised={revisedStages.has("prediction")}
           io={stageIO("prediction")}
           status={
             prediction && (
@@ -302,6 +469,7 @@ export default function RunView({
           step="3"
           title="Reconstruction / Evidence Agent"
           phase={phaseOf("reconstruction", !!reconstruction)}
+          revised={revisedStages.has("reconstruction")}
           io={stageIO("reconstruction")}
           status={
             reconstruction && (
@@ -336,6 +504,7 @@ export default function RunView({
           step="4"
           title="Root-Cause Agent"
           phase={phaseOf("root_cause", !!rootCause)}
+          revised={revisedStages.has("root_cause")}
           io={stageIO("root_cause")}
           status={rootCause && <span className="badge risk-high">conf {num(rootCause.confidence)}</span>}
         >
@@ -362,6 +531,7 @@ export default function RunView({
           step="5"
           title="Remediation Agent"
           phase={phaseOf("remediation", !!remediation)}
+          revised={revisedStages.has("remediation")}
           io={stageIO("remediation")}
           status={remediation && <span className="badge badge-warn">{remediation.proposed_action}</span>}
         >
@@ -394,6 +564,9 @@ export default function RunView({
           )}
         </StageCard>
       </section>
+
+      {/* Floating conversational review assistant (lower-right corner) */}
+      {run && <ChatPanel runId={run.run_id} onRerun={onRerun} />}
 
       {/* HITL approval gate */}
       {req && pending && (

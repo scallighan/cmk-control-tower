@@ -76,6 +76,30 @@ pick an OPEN dispute (SQL, read-only)
 8. **Ledger** — an `ApprovalRecord` plus `ACLReceipt`s (EvidencePack +
    ApprovalRecord digests) are written to the simulated ledger.
 
+## Review assistant & step rerun (human-in-the-loop tools)
+
+While a dispute is paused at the approval gate, the review assistant helps the
+human reviewer decide (`control-tower-agent/server.py`, `agents.py`,
+`web/src/RunView.tsx`):
+
+- **Review assistant** — a conversational agent (`create_conversation_agent`),
+  shown as a floating popup in the lower-right corner, that sees a full snapshot
+  of the run (dispute, trade, and every agent's findings + the pending proposal)
+  and answers questions about what each step did and why. When `MCP_SERVER_URL`
+  is set it can also query the read-only ledger tools to verify facts. It never
+  approves or executes — the human still decides. Endpoint:
+  `POST /api/runs/{run_id}/chat` (multi-turn; transcript restored via `GET`).
+- **Rerun a step with feedback (assistant tool)** — the assistant is given a
+  per-run `rerun_step(stage, feedback)` function tool. When the reviewer asks it
+  to re-test or change a step's conclusion, it calls the tool, which **kicks off a
+  live, streamed rerun in the main pipeline view**: that step and every downstream
+  step visibly re-process (processing → done) and are highlighted as *revised*,
+  then the pending HITL proposal is rebuilt so it stays internally consistent.
+  Endpoint: `GET /api/runs/{run_id}/rerun/stream?stage=&feedback=` (SSE, mirroring
+  the initial run stream). Each stage's core logic lives in a reusable
+  `run_<stage>()` in `main.py`, shared by the workflow executors, the streamed
+  rerun, and the `rerun_stage()` engine.
+
 ## Data source
 
 Azure SQL database `cmk-sqldb-ledger` on `cmk-sqldb-srv.database.windows.net`.
