@@ -346,7 +346,10 @@ export default function RunView({
     return hasData ? "done" : "pending";
   }
   function output<T>(name: StageName, runVal: T | null | undefined): T | undefined {
-    return (runVal ?? (stages[name]?.output as T | undefined)) ?? undefined;
+    // Prefer the live streamed stage output so a rerun re-renders each card as
+    // soon as that stage finishes. Falling back to runVal keeps stages populated
+    // when viewing a settled run that wasn't streamed (output taken from RunState).
+    return ((stages[name]?.output as T | undefined) ?? runVal) ?? undefined;
   }
 
   const intake = output<IntakeResult>("intake", run?.intake);
